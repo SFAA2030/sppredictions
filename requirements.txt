@@ -1,0 +1,21 @@
+# Core data science - Python 3.13 compatible versions
+numpy==1.26.0
+pandas==2.2.0
+scikit-learn==1.4.0
+matplotlib==3.8.0
+seaborn==0.13.0
+xgboost==2.0.0
+
+# Web app
+streamlit==1.30.0
+plotly==5.18.0
+
+# DATE FETCHING
+pandas_datareader==0.10.0
+
+# Utilities
+joblib==1.3.0
+pickle-mixin==1.0.2  # replaces pickle5
+
+# CRITICAL: Protocol buffers fix
+protobuf==3.20.3
