@@ -1,7 +1,7 @@
 """
 S&P 500 Stock Price Predictor Web App
 Uses trained model from train_model.py
-Fetches live + historical data via pandas_datareader
+Fetches live + historical data with multiple sources and local caching
 """
 
 import streamlit as st
@@ -10,11 +10,26 @@ import numpy as np
 from datetime import datetime, timedelta
 import pickle
 import os
+import json
+from pathlib import Path
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 from pandas_datareader import data as pdr
 import warnings
 warnings.filterwarnings('ignore')
+
+# Try importing optional data sources
+try:
+    import yfinance as yf
+    YFINANCE_AVAILABLE = True
+except ImportError:
+    YFINANCE_AVAILABLE = False
+
+try:
+    import requests
+    REQUESTS_AVAILABLE = True
+except ImportError:
+    REQUESTS_AVAILABLE = False
 
 # -------------------------------
 # CONFIG
@@ -24,6 +39,10 @@ st.set_page_config(
     page_icon="📈",
     layout="wide"
 )
+
+# Create data directory if it doesn't exist
+DATA_DIR = Path("stock_data")
+DATA_DIR.mkdir(exist_ok=True)
 
 # -------------------------------
 # LOAD MODEL AND METADATA
@@ -49,44 +68,251 @@ def load_model():
 
         return model, scaler_X, scaler_y, features, metadata
     except FileNotFoundError:
-        st.error(" Model files not found! Please run model_creator.py first to train the model.")
+        st.error("❌ Model files not found! Please run model_creator.py first to train the model.")
         st.stop()
 
 model, scaler_X, scaler_y, features, metadata = load_model()
 
 # -------------------------------
-# SIDEBAR
+# DATA CACHING FUNCTIONS
 # -------------------------------
-st.sidebar.title("🔍 Stock Predictor")
-symbol = st.sidebar.text_input("Enter Stock Symbol (e.g., AAPL)", "AAPL").upper()
-days = st.sidebar.slider("Prediction Horizon (Days)", 1, 30, 7)
+def save_stock_data(symbol, df):
+    """Save stock data to local file"""
+    if df.empty:
+        return False
+    
+    filename = DATA_DIR / f"{symbol}_{datetime.now().strftime('%Y%m%d')}.parquet"
+    metadata_file = DATA_DIR / f"{symbol}_metadata.json"
+    
+    # Save data
+    df.to_parquet(filename)
+    
+    # Update metadata
+    metadata = {
+        'symbol': symbol,
+        'last_update': datetime.now().isoformat(),
+        'filename': str(filename),
+        'rows': len(df),
+        'start_date': df.index.min().isoformat() if not df.empty else None,
+        'end_date': df.index.max().isoformat() if not df.empty else None
+    }
+    
+    # Keep track of latest file
+    latest_file = DATA_DIR / f"{symbol}_latest.parquet"
+    df.to_parquet(latest_file)
+    
+    # Save metadata
+    with open(metadata_file, 'w') as f:
+        json.dump(metadata, f)
+    
+    return True
 
+def load_latest_cached_data(symbol):
+    """Load the most recent cached data for a symbol"""
+    latest_file = DATA_DIR / f"{symbol}_latest.parquet"
+    metadata_file = DATA_DIR / f"{symbol}_metadata.json"
+    
+    if latest_file.exists():
+        try:
+            df = pd.read_parquet(latest_file)
+            
+            # Load metadata if available
+            if metadata_file.exists():
+                with open(metadata_file, 'r') as f:
+                    metadata = json.load(f)
+                last_update = datetime.fromisoformat(metadata['last_update'])
+                days_old = (datetime.now() - last_update).days
+                
+                st.info(f"📂 Loaded cached data from {last_update.strftime('%Y-%m-%d')} ({days_old} days old)")
+            else:
+                st.info("📂 Loaded cached data")
+            
+            return df
+        except Exception as e:
+            st.warning(f"Could not load cached data: {e}")
+    
+    return pd.DataFrame()
 
-
-st.sidebar.markdown("---")
-st.sidebar.subheader("Model Info")
-st.sidebar.info(f"**Best Model:** {metadata['best_model']}")
-if 'mae_score' in metadata:
-    st.sidebar.info(f"**MAE:** {metadata['mae_score']:.4f}")
-st.sidebar.info(f"**R² Score:** {metadata['r2_score']:.3f}")
-st.sidebar.info(f"**Training Date:** {metadata['training_date'][:10]}")
+def list_cached_symbols():
+    """List all symbols with cached data"""
+    symbols = set()
+    for file in DATA_DIR.glob("*_latest.parquet"):
+        symbol = file.name.replace("_latest.parquet", "")
+        symbols.add(symbol)
+    return sorted(symbols)
 
 # -------------------------------
-# FETCH DATA
+# DATA FETCHING FUNCTIONS
 # -------------------------------
+def fetch_from_yfinance(symbol, start, end):
+    """Fetch data from Yahoo Finance"""
+    if not YFINANCE_AVAILABLE:
+        return pd.DataFrame()
+    
+    try:
+        ticker = yf.Ticker(symbol)
+        df = ticker.history(start=start, end=end)
+        
+        if not df.empty:
+            # Standardize column names
+            df.columns = [col.capitalize() for col in df.columns]
+            if 'Volume' in df.columns:
+                df['Volume'] = df['Volume'].astype(float)
+            
+            st.success(f"✅ Fetched from Yahoo Finance: {len(df)} days")
+            return df
+    except Exception as e:
+        st.warning(f"Yahoo Finance failed: {str(e)[:50]}...")
+    
+    return pd.DataFrame()
+
+def fetch_from_stooq(symbol, start, end):
+    """Fetch data from Stooq"""
+    try:
+        df = pdr.DataReader(symbol, 'stooq', start, end)
+        if not df.empty:
+            df.sort_index(inplace=True)
+            st.success(f"✅ Fetched from Stooq: {len(df)} days")
+            return df
+    except Exception as e:
+        st.warning(f"Stooq failed: {str(e)[:50]}...")
+    
+    return pd.DataFrame()
+
+def fetch_from_alphavantage(symbol, start, end, api_key=None):
+    """Fetch data from Alpha Vantage (requires API key)"""
+    if not REQUESTS_AVAILABLE or not api_key:
+        return pd.DataFrame()
+    
+    try:
+        # Alpha Vantage free endpoint (adjust as needed)
+        url = f"https://www.alphavantage.co/query"
+        params = {
+            'function': 'TIME_SERIES_DAILY',
+            'symbol': symbol,
+            'apikey': api_key,
+            'outputsize': 'full'
+        }
+        
+        response = requests.get(url, params=params)
+        data = response.json()
+        
+        if 'Time Series (Daily)' in data:
+            time_series = data['Time Series (Daily)']
+            df = pd.DataFrame.from_dict(time_series, orient='index')
+            df.index = pd.to_datetime(df.index)
+            df = df.sort_index()
+            
+            # Rename columns
+            df = df.rename(columns={
+                '1. open': 'Open',
+                '2. high': 'High',
+                '3. low': 'Low',
+                '4. close': 'Close',
+                '5. volume': 'Volume'
+            })
+            
+            # Convert to float
+            for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
+                df[col] = pd.to_numeric(df[col])
+            
+            # Filter by date range
+            df = df[(df.index >= pd.Timestamp(start)) & (df.index <= pd.Timestamp(end))]
+            
+            if not df.empty:
+                st.success(f"✅ Fetched from Alpha Vantage: {len(df)} days")
+                return df
+    except Exception as e:
+        st.warning(f"Alpha Vantage failed: {str(e)[:50]}...")
+    
+    return pd.DataFrame()
+
+def fetch_sample_data(symbol):
+    """Generate sample data for testing when all sources fail"""
+    st.warning("⚠️ Using sample data for demonstration")
+    
+    end = datetime.now()
+    start = end - timedelta(days=5*365)
+    dates = pd.date_range(start=start, end=end, freq='D')
+    
+    np.random.seed(hash(symbol) % 2**32)
+    
+    # Generate realistic stock data
+    base_price = 100 + np.random.randn() * 50
+    returns = np.random.randn(len(dates)) * 0.02
+    price = base_price * np.exp(np.cumsum(returns))
+    
+    df = pd.DataFrame(index=dates)
+    df['Close'] = price
+    df['Open'] = price * (1 + np.random.randn(len(dates)) * 0.005)
+    df['High'] = price * (1 + abs(np.random.randn(len(dates)) * 0.01))
+    df['Low'] = price * (1 - abs(np.random.randn(len(dates)) * 0.01))
+    df['Volume'] = np.random.randint(1000000, 10000000, len(dates))
+    
+    return df
+
 @st.cache_data(ttl=3600)
-def fetch_stock_data(symbol):
-    """Fetch historical data using pandas_datareader"""
+def fetch_stock_data(symbol, use_cache=True, force_refresh=False):
+    """
+    Fetch historical data from multiple sources with local caching
+    """
     end = datetime.now()
     start = end - timedelta(days=5*365)
     
-    try:
-        df = pdr.DataReader(symbol, 'stooq', start, end)
-        df.sort_index(inplace=True)
+    # Try to load from cache first
+    if use_cache and not force_refresh:
+        cached_df = load_latest_cached_data(symbol)
+        if not cached_df.empty:
+            # Check if cache is recent (less than 1 day old)
+            metadata_file = DATA_DIR / f"{symbol}_metadata.json"
+            if metadata_file.exists():
+                with open(metadata_file, 'r') as f:
+                    metadata = json.load(f)
+                last_update = datetime.fromisoformat(metadata['last_update'])
+                if (datetime.now() - last_update).days < 1:
+                    return cached_df
+    
+    # Try multiple data sources in order
+    sources = []
+    
+    # 1. Yahoo Finance (most reliable)
+    df = fetch_from_yfinance(symbol, start, end)
+    if not df.empty:
+        sources.append(("Yahoo Finance", len(df)))
+        save_stock_data(symbol, df)
         return df
-    except Exception as e:
-        st.error(f"Failed to fetch data for {symbol}: {e}")
-        return pd.DataFrame()
+    
+    # 2. Stooq
+    df = fetch_from_stooq(symbol, start, end)
+    if not df.empty:
+        sources.append(("Stooq", len(df)))
+        save_stock_data(symbol, df)
+        return df
+    
+    # 3. Alpha Vantage (if API key available)
+    alpha_vantage_key = os.environ.get('ALPHA_VANTAGE_API_KEY')
+    if alpha_vantage_key:
+        df = fetch_from_alphavantage(symbol, start, end, alpha_vantage_key)
+        if not df.empty:
+            sources.append(("Alpha Vantage", len(df)))
+            save_stock_data(symbol, df)
+            return df
+    
+    # If all live sources fail, try cached data again
+    if use_cache:
+        cached_df = load_latest_cached_data(symbol)
+        if not cached_df.empty:
+            st.warning("⚠️ Using cached data (live sources unavailable)")
+            return cached_df
+    
+    # Last resort: generate sample data
+    df = fetch_sample_data(symbol)
+    if not df.empty:
+        st.warning("⚠️ Using generated sample data")
+        return df
+    
+    st.error(f"❌ Failed to fetch data for {symbol} from any source")
+    return pd.DataFrame()
 
 # -------------------------------
 # FEATURE ENGINEERING 
@@ -126,8 +352,6 @@ def prepare_features(df):
     
     df.dropna(inplace=True)
     return df
-
-
 
 # -------------------------------
 # PREDICTION FUNCTIONS 
@@ -233,6 +457,51 @@ def predict_future(data, days, available_features):
     return predictions, confidence_intervals
 
 # -------------------------------
+# SIDEBAR
+# -------------------------------
+st.sidebar.title("🔍 Stock Predictor")
+
+# Symbol input with autocomplete from cache
+cached_symbols = list_cached_symbols()
+if cached_symbols:
+    symbol = st.sidebar.selectbox(
+        "Select Stock Symbol",
+        options=[""] + cached_symbols + ["Enter custom..."],
+        format_func=lambda x: "Choose a symbol..." if x == "" else x
+    )
+    if symbol == "Enter custom...":
+        symbol = st.sidebar.text_input("Enter custom symbol", "AAPL").upper()
+    elif symbol == "":
+        symbol = st.sidebar.text_input("Enter Stock Symbol (e.g., AAPL)", "AAPL").upper()
+else:
+    symbol = st.sidebar.text_input("Enter Stock Symbol (e.g., AAPL)", "AAPL").upper()
+
+days = st.sidebar.slider("Prediction Horizon (Days)", 1, 30, 7)
+
+# Data source options
+st.sidebar.markdown("---")
+st.sidebar.subheader("📊 Data Options")
+
+use_cache = st.sidebar.checkbox("Use cached data", value=True)
+force_refresh = st.sidebar.checkbox("Force refresh from live sources", value=False)
+
+if st.sidebar.button("🔄 Clear Cache for This Symbol"):
+    cache_files = list(DATA_DIR.glob(f"{symbol}_*"))
+    for f in cache_files:
+        f.unlink()
+    st.sidebar.success(f"Cleared cache for {symbol}")
+    st.cache_data.clear()
+
+# Model info
+st.sidebar.markdown("---")
+st.sidebar.subheader("🤖 Model Info")
+st.sidebar.info(f"**Best Model:** {metadata['best_model']}")
+if 'mae_score' in metadata:
+    st.sidebar.info(f"**MAE:** {metadata['mae_score']:.4f}")
+st.sidebar.info(f"**R² Score:** {metadata['r2_score']:.3f}")
+st.sidebar.info(f"**Training Date:** {metadata['training_date'][:10]}")
+
+# -------------------------------
 # MAIN APP
 # -------------------------------
 if symbol:
@@ -240,11 +509,19 @@ if symbol:
 
     # Fetch data
     with st.spinner(f"Fetching historical data for {symbol}..."):
-        hist = fetch_stock_data(symbol)
+        hist = fetch_stock_data(symbol, use_cache=use_cache, force_refresh=force_refresh)
+        
         if hist.empty:
             st.stop()
         
-        st.success(f"Data fetched: {len(hist)} days")
+        # Show data source info
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Data Points", f"{len(hist)} days")
+        with col2:
+            st.metric("Date Range", f"{hist.index[0].strftime('%Y-%m-%d')} to {hist.index[-1].strftime('%Y-%m-%d')}")
+        with col3:
+            st.metric("Latest Price", f"${hist['Close'].iloc[-1]:.2f}")
     
     # Prepare features
     with st.spinner("Preparing features..."):
@@ -255,28 +532,27 @@ if symbol:
             st.error("Too many features missing.")
             st.stop()
     
-    
     # Make predictions
     with st.spinner(f"Predicting next {days} days..."):
         try:
             future_prices, confidence_intervals = predict_future(featured_data, days, available_features)
             
             if not future_prices:
-                st.error(" Failed to generate predictions")
+                st.error("❌ Failed to generate predictions")
                 st.stop()
             
             last_date = featured_data.index[-1]
             future_dates = [last_date + timedelta(days=x+1) for x in range(len(future_prices))]
             
-            st.success(" Predictions completed!")
+            st.success("✅ Predictions completed!")
         except Exception as e:
-            st.error(f" Prediction failed: {str(e)}")
+            st.error(f"❌ Prediction failed: {str(e)}")
             st.stop()
 
     # -------------------------------
-    # CHART
+    # CHARTS
     # -------------------------------
-    st.subheader("Price History & Prediction")
+    st.subheader("📊 Price History & Prediction")
     
     fig = make_subplots(
         rows=2, cols=1,
@@ -285,13 +561,14 @@ if symbol:
         row_heights=[0.7, 0.3]
     )
 
-    # Historical (last 90 days)
-    historical_days = min(90, len(featured_data))
+    # Historical (last 180 days for better context)
+    historical_days = min(180, len(featured_data))
     hist_prices = featured_data['Close'][-historical_days:]
     hist_dates = featured_data.index[-historical_days:]
     
     fig.add_trace(
-        go.Scatter(x=hist_dates, y=hist_prices, mode='lines', name='Historical', line=dict(color='#1f77b4', width=2)),
+        go.Scatter(x=hist_dates, y=hist_prices, mode='lines', name='Historical', 
+                  line=dict(color='#1f77b4', width=2)),
         row=1, col=1
     )
 
@@ -368,24 +645,45 @@ if symbol:
     
     st.dataframe(pred_df, use_container_width=True, hide_index=True)
     
-    # Download
-    csv = pred_df.to_csv(index=False)
-    st.download_button(
-        label="Download Predictions",
-        data=csv,
-        file_name=f"{symbol}_predictions_{datetime.now().strftime('%Y%m%d')}.csv",
-        mime="text/csv"
-    )
+    # Download buttons
+    col1, col2 = st.columns(2)
+    with col1:
+        csv = pred_df.to_csv(index=False)
+        st.download_button(
+            label="📥 Download Predictions (CSV)",
+            data=csv,
+            file_name=f"{symbol}_predictions_{datetime.now().strftime('%Y%m%d')}.csv",
+            mime="text/csv"
+        )
+    
+    with col2:
+        # Option to download raw data
+        if st.button("💾 Save Current Data to Cache"):
+            if save_stock_data(symbol, hist):
+                st.success(f"Data saved to cache!")
+            else:
+                st.error("Failed to save data")
+
+    # -------------------------------
+    # HISTORICAL DATA VIEWER
+    # -------------------------------
+    with st.expander("📜 View Historical Data"):
+        st.dataframe(hist.tail(50), use_container_width=True)
 
 else:
-    st.info("Enter a stock symbol in the sidebar to start")
+    st.info("👈 Enter a stock symbol in the sidebar to start")
+    
+    # Show cached symbols if available
+    if cached_symbols:
+        st.subheader("📁 Available Cached Symbols")
+        st.write(f"Previously viewed symbols: {', '.join(cached_symbols)}")
 
 # Footer
 st.markdown("---")
 st.markdown(
     """
     <div style='text-align: center; color: gray; padding: 10px;'>
-        <b>Disclaimer:</b> Created For Academic Purpose!!!.
+        <b>Disclaimer:</b> Created for Academic Purpose Only. Data may be cached or from multiple sources.
     </div>
     """,
     unsafe_allow_html=True
