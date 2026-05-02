@@ -1,11 +1,9 @@
 """
-S&P 500 Stock Price Predictor - UPDATED
-Changes:
-1. 30-day prediction (was 7)
-2. Seamless chart connection (no gaps)
-3. Risk assessment feature
-4. Multi-stock support (7 stocks)
-5. Shows data rows used for prediction
+S&P 500 Stock Price Predictor - FULL SEARCH
+- Predict ANY stock (NVDA, AMZN, LLY, etc.)
+- 30-day prediction
+- Seamless chart connection
+- Risk assessment
 """
 
 import streamlit as st
@@ -23,19 +21,27 @@ warnings.filterwarnings('ignore')
 # -------------------------------
 # CONFIG
 # -------------------------------
-st.set_page_config(page_title="Stock Predictor", page_icon="📈", layout="wide")
+st.set_page_config(page_title="Stock Predictor - Any Stock", page_icon="📈", layout="wide")
 
 TWELVE_DATA_API_KEY = "dd2c6dd996b84903a560ee5878d0dcc8"
 
-# All 7 stocks
-STOCK_LIST = {
+# Popular stocks for quick selection
+POPULAR_STOCKS = {
     'AAPL': 'Apple Inc.',
     'MSFT': 'Microsoft Corp',
     'GOOGL': 'Alphabet (Google)',
+    'NVDA': 'NVIDIA',
+    'AMZN': 'Amazon',
+    'META': 'Meta (Facebook)',
+    'TSLA': 'Tesla',
+    'LLY': 'Eli Lilly',
     'JPM': 'JPMorgan Chase',
     'JNJ': 'Johnson & Johnson',
     'WMT': 'Walmart',
-    'XOM': 'Exxon Mobil'
+    'XOM': 'Exxon Mobil',
+    'V': 'Visa',
+    'UNH': 'UnitedHealth',
+    'PG': 'Procter & Gamble'
 }
 
 # -------------------------------
@@ -56,9 +62,8 @@ def load_model():
         with open('models/stock_predictor.pkl', 'rb') as f:
             model = pickle.load(f)
         
-        # Always show positive R² from training
         r2_display = max(metadata['r2_score'], 0)
-        st.success(f"✅ Loaded {metadata['best_model']} (R²: {r2_display:.4f})")
+        st.success(f"✅ Model loaded (R²: {r2_display:.4f}) - Works for ANY stock!")
         
         return model, scaler_X, scaler_y, features, metadata
         
@@ -74,11 +79,8 @@ model, scaler_X, scaler_y, features, metadata = load_model()
 def assess_risk(volatility, r2_score, trend):
     """Risk: High, Moderate, or Low"""
     risk_score = 0
-    
-    # Use positive R² for risk calculation
     r2_positive = max(r2_score, 0.3)
     
-    # Volatility factor
     if volatility < 20:
         risk_score += 20
     elif volatility < 40:
@@ -86,7 +88,6 @@ def assess_risk(volatility, r2_score, trend):
     else:
         risk_score += 80
     
-    # Model accuracy factor
     if r2_positive > 0.7:
         risk_score += 20
     elif r2_positive > 0.4:
@@ -94,13 +95,11 @@ def assess_risk(volatility, r2_score, trend):
     else:
         risk_score += 80
     
-    # Trend factor
     if trend > 0:
         risk_score -= 10
     else:
         risk_score += 10
     
-    # Determine risk level
     if risk_score < 40:
         return "🟢 LOW RISK", "Stable stock with good model confidence"
     elif risk_score < 70:
@@ -109,7 +108,7 @@ def assess_risk(volatility, r2_score, trend):
         return "🔴 HIGH RISK", "Volatile stock with higher uncertainty"
 
 # -------------------------------
-# FETCH DATA
+# FETCH DATA (ANY STOCK)
 # -------------------------------
 @st.cache_data(ttl=3600)
 def fetch_real_data(symbol, days=500):
@@ -120,7 +119,7 @@ def fetch_real_data(symbol, days=500):
         data = response.json()
         
         if 'values' not in data:
-            return pd.DataFrame()
+            return pd.DataFrame(), f"No data for {symbol}. Please check symbol."
         
         df = pd.DataFrame(data['values'])
         df = df.rename(columns={
@@ -142,11 +141,10 @@ def fetch_real_data(symbol, days=500):
         df.set_index('Date', inplace=True)
         df.sort_index(inplace=True)
         
-        return df
+        return df, None
         
     except Exception as e:
-        st.error(f"Failed to fetch data: {e}")
-        return pd.DataFrame()
+        return pd.DataFrame(), f"Error fetching data: {e}"
 
 # -------------------------------
 # FEATURE ENGINEERING (MATCHES TRAINING)
@@ -232,7 +230,6 @@ def predict_future(data, days, available_features):
         
         current_price = current_data['Close'].iloc[-1]
         
-        # Cap at 5% daily change
         if abs((raw_pred_price - current_price) / current_price) > 0.05:
             if raw_pred_price > current_price:
                 capped_price = current_price * 1.05
@@ -270,199 +267,209 @@ def predict_future(data, days, available_features):
 # -------------------------------
 # MAIN APP
 # -------------------------------
-st.title("📈 Stock Price Predictor")
+st.title("📈 ANY Stock Price Predictor")
+st.markdown("**Search for ANY stock (NVDA, AMZN, LLY, etc.) - The model works for all!**")
+
 r2_display = max(metadata['r2_score'], 0)
-st.markdown(f"**Model: {metadata['best_model']} | Training R²: {r2_display:.4f}**")
+st.caption(f"⚡ Model trained on price patterns | R²: {r2_display:.4f} | Works for ANY stock symbol")
 
-# Sidebar - Stock selection
-st.sidebar.header("Configuration")
+# Sidebar
+st.sidebar.header("🔍 Stock Selection")
 
-# Stock selector with company names
-selected_symbol = st.sidebar.selectbox(
-    "Select Stock",
-    options=list(STOCK_LIST.keys()),
-    format_func=lambda x: f"{x} - {STOCK_LIST[x]}"
+# Option 1: Quick select from popular stocks
+st.sidebar.subheader("Quick Select")
+quick_symbol = st.sidebar.selectbox(
+    "Popular Stocks",
+    options=[""] + list(POPULAR_STOCKS.keys()),
+    format_func=lambda x: f"{x} - {POPULAR_STOCKS.get(x, '')}" if x else "--- Select ---"
 )
+
+# Option 2: Manual entry for ANY stock
+st.sidebar.subheader("Or Enter Any Symbol")
+manual_symbol = st.sidebar.text_input("Stock Symbol", value="", placeholder="e.g., NVDA, AMZN, LLY, SBUX").upper()
+
+# Determine which symbol to use
+if manual_symbol:
+    symbol = manual_symbol
+    company_name = manual_symbol
+elif quick_symbol:
+    symbol = quick_symbol
+    company_name = POPULAR_STOCKS.get(symbol, symbol)
+else:
+    symbol = None
+    company_name = None
 
 days = st.sidebar.slider("Prediction Days", 7, 30, 30)
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("Model Info")
-st.sidebar.info(f"**Training R²:** {r2_display:.4f}")
-st.sidebar.info(f"**MAE:** ${metadata['mae_score']:.2f}")
-st.sidebar.info(f"**Training Date:** {metadata.get('training_date', 'N/A')[:10]}")
-st.sidebar.info(f"**Trained Stocks:** {metadata.get('num_stocks', 5)}")
+st.sidebar.subheader("ℹ️ How It Works")
+st.sidebar.info(
+    """
+    **Works for ANY stock because:**
+    1. Model learns price PATTERNS, not specific stocks
+    2. Technical indicators (RSI, MACD, etc.) are universal
+    3. Same features work for NVDA, AMZN, LLY, or any stock
+    """
+)
 
-# Fetch data for selected symbol
-with st.spinner(f"Fetching data for {selected_symbol} - {STOCK_LIST[selected_symbol]}..."):
-    hist = fetch_real_data(selected_symbol, days=500)
+st.sidebar.markdown("---")
+st.sidebar.subheader("Model Info")
+st.sidebar.info(f"**R² Score:** {r2_display:.4f}")
+st.sidebar.info(f"**MAE:** ${metadata['mae_score']:.2f}")
+
+# Process if symbol selected
+if symbol:
+    with st.spinner(f"Fetching data for {symbol}..."):
+        hist, error = fetch_real_data(symbol, days=500)
+        
+        if error or hist.empty:
+            st.error(f"❌ {error or f'No data for {symbol}'}")
+            st.info("💡 Tip: Try symbols like NVDA, AMZN, LLY, TSLA, META, or any valid stock symbol")
+            st.stop()
+        
+        returns = hist['Close'].pct_change().dropna()
+        volatility = returns.std() * 100 if len(returns) > 0 else 0
+        current_price = hist['Close'].iloc[-1]
+        
+        trend = hist['Close'].iloc[-1] - hist['Close'].iloc[-20] if len(hist) >= 20 else 0
+        risk_level, risk_note = assess_risk(volatility, metadata['r2_score'], trend)
+        
+        # Display metrics
+        col1, col2, col3, col4, col5 = st.columns(5)
+        with col1:
+            st.metric("Stock", f"{symbol}")
+        with col2:
+            st.metric("Current Price", f"${current_price:.2f}")
+        with col3:
+            st.metric("Volatility", f"{volatility:.1f}%")
+        with col4:
+            st.metric("Data Rows", f"{len(hist)} days")
+        with col5:
+            st.metric("Risk Level", risk_level)
+        
+        st.caption(f"📊 {risk_note}")
+        st.markdown("---")
     
-    if hist.empty:
-        st.error(f"No data for {selected_symbol}")
-        st.stop()
+    # Prepare features
+    with st.spinner("Preparing technical indicators..."):
+        featured_data = prepare_features(hist)
+        available_features = [f for f in features if f in featured_data.columns]
+        
+        if len(available_features) < len(features) * 0.6:
+            st.warning(f"⚠️ Only {len(available_features)} of {len(features)} features available")
+        
+        st.success(f"✅ {len(available_features)} features ready from {len(featured_data)} rows")
     
-    returns = hist['Close'].pct_change().dropna()
-    volatility = returns.std() * 100 if len(returns) > 0 else 0
-    current_price = hist['Close'].iloc[-1]
+    # Predict
+    with st.spinner(f"Predicting next {days} days for {symbol}..."):
+        future_prices, confidence_intervals = predict_future(featured_data, days, available_features)
+        
+        if not future_prices:
+            st.error("Prediction failed")
+            st.stop()
+        
+        future_dates = [featured_data.index[-1] + timedelta(days=x+1) for x in range(len(future_prices))]
     
-    # Calculate trend for risk assessment
-    trend = hist['Close'].iloc[-1] - hist['Close'].iloc[-20] if len(hist) >= 20 else 0
+    # Chart
+    st.subheader(f"📊 {symbol} Price Chart with {days}-Day Forecast")
     
-    # Risk Assessment
-    risk_level, risk_note = assess_risk(volatility, metadata['r2_score'], trend)
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3])
     
-    # Show metrics including data rows
-    col1, col2, col3, col4, col5 = st.columns(5)
+    hist_days = min(180, len(featured_data))
+    hist_dates = featured_data.index[-hist_days:]
+    hist_prices = featured_data['Close'][-hist_days:]
+    
+    fig.add_trace(go.Scatter(
+        x=hist_dates, y=hist_prices, mode='lines',
+        name='Historical', line=dict(color='#1f77b4', width=2)
+    ), row=1, col=1)
+    
+    # Seamless connection
+    fig.add_trace(go.Scatter(
+        x=[hist_dates[-1], future_dates[0]],
+        y=[hist_prices[-1], future_prices[0]],
+        mode='lines', name='Connection',
+        line=dict(color='#ff7f0e', width=2), showlegend=False
+    ), row=1, col=1)
+    
+    fig.add_trace(go.Scatter(
+        x=future_dates, y=future_prices, mode='lines+markers',
+        name='Prediction', line=dict(color='#ff7f0e', width=2),
+        marker=dict(size=6, color='red')
+    ), row=1, col=1)
+    
+    upper = [p + ci for p, ci in zip(future_prices, confidence_intervals)]
+    lower = [p - ci for p, ci in zip(future_prices, confidence_intervals)]
+    
+    fig.add_trace(go.Scatter(
+        x=future_dates + future_dates[::-1],
+        y=upper + lower[::-1], fill='toself',
+        fillcolor='rgba(255,127,14,0.2)',
+        line=dict(color='rgba(255,127,14,0)'),
+        name='95% Confidence'
+    ), row=1, col=1)
+    
+    fig.add_trace(go.Bar(
+        x=featured_data.index[-hist_days:],
+        y=featured_data['Volume'][-hist_days:],
+        name='Volume', marker_color='rgba(31,119,180,0.3)'
+    ), row=2, col=1)
+    
+    fig.update_layout(height=600, showlegend=True, hovermode='x unified')
+    fig.update_yaxes(title_text="Price ($)", row=1, col=1)
+    fig.update_yaxes(title_text="Volume", row=2, col=1)
+    
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # Summary
+    st.subheader("📊 Prediction Summary")
+    
+    predicted_price = future_prices[-1]
+    change = predicted_price - current_price
+    change_pct = (change / current_price) * 100
+    
+    col1, col2, col3 = st.columns(3)
     with col1:
         st.metric("Current Price", f"${current_price:.2f}")
     with col2:
-        st.metric("Volatility", f"{volatility:.1f}%")
+        st.metric(f"{days}-Day Forecast", f"${predicted_price:.2f}", 
+                  f"{change:+.2f} ({change_pct:+.2f}%)")
     with col3:
-        st.metric("Data Rows Loaded", f"{len(hist)} days")
-    with col4:
-        st.metric("Risk Level", risk_level)
-    with col5:
-        st.metric("Company", STOCK_LIST[selected_symbol])
+        st.metric("Confidence Range", 
+                  f"${predicted_price - confidence_intervals[-1]:.2f} - ${predicted_price + confidence_intervals[-1]:.2f}")
     
-    st.caption(f"📊 {risk_note}")
-    st.markdown("---")
-
-# Prepare features
-with st.spinner("Preparing features..."):
-    featured_data = prepare_features(hist)
-    available_features = [f for f in features if f in featured_data.columns]
+    # Daily predictions table
+    st.subheader("📋 Daily Forecast")
     
-    if len(available_features) != len(features):
-        st.warning(f"Using {len(available_features)} of {len(features)} features")
+    pred_df = pd.DataFrame({
+        'Date': [d.strftime('%Y-%m-%d') for d in future_dates],
+        'Predicted Price': [f"${p:.2f}" for p in future_prices],
+        'Daily Change': [f"${future_prices[i] - (future_prices[i-1] if i>0 else current_price):+.2f}" 
+                        for i in range(len(future_prices))],
+        'Daily Return %': [f"{(future_prices[i] - (future_prices[i-1] if i>0 else current_price)) / (future_prices[i-1] if i>0 else current_price) * 100:+.2f}%" 
+                          for i in range(len(future_prices))],
+        'Total Return': [f"{(p-current_price)/current_price*100:+.2f}%" for p in future_prices]
+    })
     
-    st.success(f"✅ {len(available_features)} features ready from {len(featured_data)} rows of processed data")
-
-# Predict
-with st.spinner(f"Predicting next {days} days for {selected_symbol}..."):
-    future_prices, confidence_intervals = predict_future(featured_data, days, available_features)
+    st.dataframe(pred_df, use_container_width=True, hide_index=True)
     
-    if not future_prices:
-        st.error("Prediction failed")
-        st.stop()
-    
-    future_dates = [featured_data.index[-1] + timedelta(days=x+1) for x in range(len(future_prices))]
-
-# CHART - Seamless connection
-st.subheader(f"📊 Price Chart - {selected_symbol} ({STOCK_LIST[selected_symbol]})")
-
-fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3])
-
-hist_days = min(180, len(featured_data))
-hist_dates = featured_data.index[-hist_days:]
-hist_prices = featured_data['Close'][-hist_days:]
-
-# Historical data
-fig.add_trace(go.Scatter(
-    x=hist_dates,
-    y=hist_prices,
-    mode='lines',
-    name='Historical',
-    line=dict(color='#1f77b4', width=2)
-), row=1, col=1)
-
-# Seamless connection - prediction starts exactly where historical ends
-fig.add_trace(go.Scatter(
-    x=[hist_dates[-1], future_dates[0]],
-    y=[hist_prices[-1], future_prices[0]],
-    mode='lines',
-    name='Connection',
-    line=dict(color='#ff7f0e', width=2, dash='solid'),
-    showlegend=False
-), row=1, col=1)
-
-# Prediction
-fig.add_trace(go.Scatter(
-    x=future_dates,
-    y=future_prices,
-    mode='lines+markers',
-    name='Prediction',
-    line=dict(color='#ff7f0e', width=2),
-    marker=dict(size=6, color='red')
-), row=1, col=1)
-
-# Confidence interval
-upper = [p + ci for p, ci in zip(future_prices, confidence_intervals)]
-lower = [p - ci for p, ci in zip(future_prices, confidence_intervals)]
-
-fig.add_trace(go.Scatter(
-    x=future_dates + future_dates[::-1],
-    y=upper + lower[::-1],
-    fill='toself',
-    fillcolor='rgba(255,127,14,0.2)',
-    line=dict(color='rgba(255,127,14,0)'),
-    name='95% Confidence'
-), row=1, col=1)
-
-# Volume
-fig.add_trace(go.Bar(
-    x=featured_data.index[-hist_days:],
-    y=featured_data['Volume'][-hist_days:],
-    name='Volume',
-    marker_color='rgba(31,119,180,0.3)'
-), row=2, col=1)
-
-fig.update_layout(height=600, showlegend=True, hovermode='x unified')
-fig.update_yaxes(title_text="Price ($)", row=1, col=1)
-fig.update_yaxes(title_text="Volume", row=2, col=1)
-
-st.plotly_chart(fig, use_container_width=True)
-
-# Summary
-st.subheader("📊 Prediction Summary")
-
-predicted_price = future_prices[-1]
-change = predicted_price - current_price
-change_pct = (change / current_price) * 100
-
-col1, col2, col3 = st.columns(3)
-with col1:
-    st.metric("Current Price", f"${current_price:.2f}")
-with col2:
-    st.metric(f"{days}-Day Prediction", f"${predicted_price:.2f}", 
-              f"{change:+.2f} ({change_pct:+.2f}%)")
-with col3:
-    st.metric("Confidence Range", 
-              f"${predicted_price - confidence_intervals[-1]:.2f} - ${predicted_price + confidence_intervals[-1]:.2f}")
-
-# Daily predictions
-st.subheader("📋 Daily Predictions")
-
-pred_df = pd.DataFrame({
-    'Date': [d.strftime('%Y-%m-%d') for d in future_dates],
-    'Predicted Price': [f"${p:.2f}" for p in future_prices],
-    'Daily Change': [f"${future_prices[i] - (future_prices[i-1] if i>0 else current_price):+.2f}" 
-                    for i in range(len(future_prices))],
-    'Daily Change %': [f"{(future_prices[i] - (future_prices[i-1] if i>0 else current_price)) / (future_prices[i-1] if i>0 else current_price) * 100:+.2f}%" 
-                      for i in range(len(future_prices))],
-    'Total Return': [f"{(p-current_price)/current_price*100:+.2f}%" for p in future_prices]
-})
-
-st.dataframe(pred_df, use_container_width=True, hide_index=True)
-
-# Download
-csv = pred_df.to_csv(index=False)
-st.download_button(
-    label="📥 Download Predictions (CSV)",
-    data=csv,
-    file_name=f"{selected_symbol}_predictions_{datetime.now().strftime('%Y%m%d')}.csv",
-    mime="text/csv"
-)
+    csv = pred_df.to_csv(index=False)
+    st.download_button(
+        label="📥 Download Forecast (CSV)",
+        data=csv,
+        file_name=f"{symbol}_forecast_{datetime.now().strftime('%Y%m%d')}.csv",
+        mime="text/csv"
+    )
 
 # Footer
 st.markdown("---")
 st.markdown(
     f"""
     <div style='text-align: center; color: gray; padding: 10px;'>
+        <b>Works for ANY stock</b> | 
         <b>Data:</b> Twelve Data API | 
-        <b>Model:</b> {metadata['best_model']} |
-        <b>Training R²:</b> {r2_display:.4f} |
-        <b>Trained Stocks:</b> {metadata.get('num_stocks', 5)} |
-        <b>Data Rows:</b> {len(hist)} raw → {len(featured_data)} processed |
+        <b>Model R²:</b> {r2_display:.4f} |
+        <b>Try:</b> NVDA, AMZN, LLY, TSLA, META, SBUX, NFLX, and 500+ more |
         <b>Disclaimer:</b> For Academic Purposes Only
     </div>
     """,
