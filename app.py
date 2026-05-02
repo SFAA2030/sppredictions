@@ -4,7 +4,8 @@ Changes:
 1. 30-day prediction (was 7)
 2. Seamless chart connection (no gaps)
 3. Risk assessment feature
-4. Shows data rows used for prediction
+4. Multi-stock support (7 stocks)
+5. Shows data rows used for prediction
 """
 
 import streamlit as st
@@ -22,12 +23,20 @@ warnings.filterwarnings('ignore')
 # -------------------------------
 # CONFIG
 # -------------------------------
-st.set_page_config(page_title="AAPL Stock Predictor", page_icon="📈", layout="wide")
+st.set_page_config(page_title="Stock Predictor", page_icon="📈", layout="wide")
 
 TWELVE_DATA_API_KEY = "dd2c6dd996b84903a560ee5878d0dcc8"
 
-# Only AAPL
-SYMBOL = 'AAPL'
+# All 7 stocks
+STOCK_LIST = {
+    'AAPL': 'Apple Inc.',
+    'MSFT': 'Microsoft Corp',
+    'GOOGL': 'Alphabet (Google)',
+    'JPM': 'JPMorgan Chase',
+    'JNJ': 'Johnson & Johnson',
+    'WMT': 'Walmart',
+    'XOM': 'Exxon Mobil'
+}
 
 # -------------------------------
 # LOAD MODEL
@@ -48,7 +57,7 @@ def load_model():
             model = pickle.load(f)
         
         # Always show positive R² from training
-        r2_display = max(metadata['r2_score'], 0)  # Don't show negative
+        r2_display = max(metadata['r2_score'], 0)
         st.success(f"✅ Loaded {metadata['best_model']} (R²: {r2_display:.4f})")
         
         return model, scaler_X, scaler_y, features, metadata
@@ -77,7 +86,7 @@ def assess_risk(volatility, r2_score, trend):
     else:
         risk_score += 80
     
-    # Model accuracy factor (lower R² = higher risk)
+    # Model accuracy factor
     if r2_positive > 0.7:
         risk_score += 20
     elif r2_positive > 0.4:
@@ -261,12 +270,20 @@ def predict_future(data, days, available_features):
 # -------------------------------
 # MAIN APP
 # -------------------------------
-st.title("📈 AAPL Stock Price Predictor")
+st.title("📈 Stock Price Predictor")
 r2_display = max(metadata['r2_score'], 0)
 st.markdown(f"**Model: {metadata['best_model']} | Training R²: {r2_display:.4f}**")
 
-# Sidebar
+# Sidebar - Stock selection
 st.sidebar.header("Configuration")
+
+# Stock selector with company names
+selected_symbol = st.sidebar.selectbox(
+    "Select Stock",
+    options=list(STOCK_LIST.keys()),
+    format_func=lambda x: f"{x} - {STOCK_LIST[x]}"
+)
+
 days = st.sidebar.slider("Prediction Days", 7, 30, 30)
 
 st.sidebar.markdown("---")
@@ -274,13 +291,14 @@ st.sidebar.subheader("Model Info")
 st.sidebar.info(f"**Training R²:** {r2_display:.4f}")
 st.sidebar.info(f"**MAE:** ${metadata['mae_score']:.2f}")
 st.sidebar.info(f"**Training Date:** {metadata.get('training_date', 'N/A')[:10]}")
+st.sidebar.info(f"**Trained Stocks:** {metadata.get('num_stocks', 5)}")
 
-# Fetch data
-with st.spinner(f"Fetching data for {SYMBOL}..."):
-    hist = fetch_real_data(SYMBOL, days=500)
+# Fetch data for selected symbol
+with st.spinner(f"Fetching data for {selected_symbol} - {STOCK_LIST[selected_symbol]}..."):
+    hist = fetch_real_data(selected_symbol, days=500)
     
     if hist.empty:
-        st.error(f"No data for {SYMBOL}")
+        st.error(f"No data for {selected_symbol}")
         st.stop()
     
     returns = hist['Close'].pct_change().dropna()
@@ -300,11 +318,11 @@ with st.spinner(f"Fetching data for {SYMBOL}..."):
     with col2:
         st.metric("Volatility", f"{volatility:.1f}%")
     with col3:
-        st.metric("Data Rows Loaded", f"{len(hist)} days")  # NEW: Shows rows loaded
+        st.metric("Data Rows Loaded", f"{len(hist)} days")
     with col4:
-        st.metric("After Feature Prep", f"{len(hist) - returns.isna().sum() - 50} rows")  # Rows after feature engineering
-    with col5:
         st.metric("Risk Level", risk_level)
+    with col5:
+        st.metric("Company", STOCK_LIST[selected_symbol])
     
     st.caption(f"📊 {risk_note}")
     st.markdown("---")
@@ -313,10 +331,14 @@ with st.spinner(f"Fetching data for {SYMBOL}..."):
 with st.spinner("Preparing features..."):
     featured_data = prepare_features(hist)
     available_features = [f for f in features if f in featured_data.columns]
+    
+    if len(available_features) != len(features):
+        st.warning(f"Using {len(available_features)} of {len(features)} features")
+    
     st.success(f"✅ {len(available_features)} features ready from {len(featured_data)} rows of processed data")
 
 # Predict
-with st.spinner(f"Predicting next {days} days..."):
+with st.spinner(f"Predicting next {days} days for {selected_symbol}..."):
     future_prices, confidence_intervals = predict_future(featured_data, days, available_features)
     
     if not future_prices:
@@ -326,7 +348,7 @@ with st.spinner(f"Predicting next {days} days..."):
     future_dates = [featured_data.index[-1] + timedelta(days=x+1) for x in range(len(future_prices))]
 
 # CHART - Seamless connection
-st.subheader("📊 Price Chart")
+st.subheader(f"📊 Price Chart - {selected_symbol} ({STOCK_LIST[selected_symbol]})")
 
 fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3])
 
@@ -427,7 +449,7 @@ csv = pred_df.to_csv(index=False)
 st.download_button(
     label="📥 Download Predictions (CSV)",
     data=csv,
-    file_name=f"AAPL_predictions_{datetime.now().strftime('%Y%m%d')}.csv",
+    file_name=f"{selected_symbol}_predictions_{datetime.now().strftime('%Y%m%d')}.csv",
     mime="text/csv"
 )
 
@@ -439,6 +461,7 @@ st.markdown(
         <b>Data:</b> Twelve Data API | 
         <b>Model:</b> {metadata['best_model']} |
         <b>Training R²:</b> {r2_display:.4f} |
+        <b>Trained Stocks:</b> {metadata.get('num_stocks', 5)} |
         <b>Data Rows:</b> {len(hist)} raw → {len(featured_data)} processed |
         <b>Disclaimer:</b> For Academic Purposes Only
     </div>
