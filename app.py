@@ -27,7 +27,7 @@ st.set_page_config(page_title="Stock Predictor", page_icon="📈", layout="wide"
 TWELVE_DATA_API_KEY = "dd2c6dd996b84903a560ee5878d0dcc8"
 
 # 5 stocks for selection
-STOCK_LIST = ['AAPL', 'MSFT', 'GOOGL', 'JPM', 'JNJ', 'WMT', 'XOM']
+STOCK_LIST = ['AAPL']
 
 # -------------------------------
 # LOAD MODEL
